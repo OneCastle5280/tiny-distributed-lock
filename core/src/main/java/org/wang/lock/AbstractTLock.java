@@ -12,10 +12,13 @@ public abstract class AbstractTLock implements TLock{
 
     protected String name;
 
+    protected String clientId;
     protected RedisClient redisClient;
 
     protected AbstractTLock(String name) {
         this.name = name;
+        // TODO init redisClient
+        this.clientId = this.redisClient.getClientId();
     }
 
     public String getName() {
@@ -35,14 +38,18 @@ public abstract class AbstractTLock implements TLock{
     }
 
     protected void unlock0() {
-        String key = String.valueOf(Thread.currentThread().getId());
-
         String unlockLua =
-                "if redis.call('GET', KEYS[1]) == ARGV[1] then" +
+                "if redis.call('EXISTS', KEYS[1]) == 1 then " +
                         "    return redis.call('DEL', KEYS[1]) " +
-                        "end " +
-                        "return nil";
-        this.redisClient.executeLua(unlockLua,)
+                        "else " +
+                        "    return nil " +
+                        "end";
+        Object result = this.redisClient.executeLua(unlockLua, getLockKey(), null);
+        if (result == null) {
+            throw new IllegalStateException("illegal operator, " + getLockKey() + "is not hold the lock");
+        }
+        // return 0 or 1 means unlock success
+        // TODO notice others waiting thread to acquire lock
     }
 
 
@@ -66,23 +73,18 @@ public abstract class AbstractTLock implements TLock{
      * @return
      */
     protected Long tryAcquire(long leaseTime, TimeUnit unit) {
-        String key = String.valueOf(Thread.currentThread().getId());
-        String uuid = UUID.randomUUID().toString();
-
         String tryLockLua =
-                "if redis.call('SETNX', KEYS[1], ARGV[1]) == 1 then " +
-                        "    redis.call('PEXPIRE', KEYS[1], ARGV[2]) " +
+                "if redis.call('SETNX', KEYS[1], '1']) == '1' then " +
+                        "    redis.call('PEXPIRE', KEYS[1], ARGV[1]) " +
                         "    return nil" +
                         "else" +
                         "    return redis.call('PTTL', KEYS[1])" +
                         "end"
                 ;
 
-        Object[] args = new Object[2];
-        args[0] = uuid;
-        args[1] = unit.toMillis(leaseTime);
-        // execute lua
-        Object ttl = this.redisClient.executeLua(tryLockLua, key, args);
+        Object[] args = new Object[1];
+        args[0] = unit.toMillis(leaseTime);
+        Object ttl = this.redisClient.executeLua(tryLockLua, getLockKey(), args);
         if (ttl == null) {
             // acquire lock success, add watchdog to renewal
             // TODO watchdog
@@ -91,9 +93,12 @@ public abstract class AbstractTLock implements TLock{
         return (Long) ttl;
     }
 
-    public boolean tryLock() {
-        return false;
+    /**
+     * get lock key, which is thread id + client id
+     *
+     * @return
+     */
+    protected String getLockKey() {
+        return String.valueOf(Thread.currentThread().getId()) + ":" + this.clientId;
     }
-
-
 }

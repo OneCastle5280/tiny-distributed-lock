@@ -21,6 +21,11 @@ public class JedisRedisClient implements RedisClient {
         }
     }
 
+    @Override
+    public String getClientId() {
+        return String.valueOf(jedis.clientId());
+    }
+
     public Object executeLua(String script, String key, Object[] args) {
         // TODO
         return null;

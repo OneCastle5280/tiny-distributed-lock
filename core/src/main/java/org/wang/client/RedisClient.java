@@ -5,6 +5,8 @@ package org.wang.client;
  */
 public interface RedisClient {
 
+    String getClientId();
+
     Object executeLua(String script, String key, Object[] args);
 
 }
