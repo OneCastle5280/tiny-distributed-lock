@@ -12,4 +12,14 @@
         <module>core</module>
     </modules>
 
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>redis.clients</groupId>
+                <artifactId>jedis</artifactId>
+                <version>5.2.0</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
 </project>
