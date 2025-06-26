@@ -2,8 +2,10 @@ package org.wang.lock;
 
 import org.wang.client.RedisClient;
 
-import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+
+import static org.wang.constants.TLcokConstants.*;
 
 /**
  * @author wangjiabao
@@ -11,7 +13,6 @@ import java.util.concurrent.TimeUnit;
 public abstract class AbstractTLock implements TLock{
 
     protected String name;
-
     protected String clientId;
     protected RedisClient redisClient;
 
@@ -21,18 +22,22 @@ public abstract class AbstractTLock implements TLock{
         this.clientId = this.redisClient.getClientId();
     }
 
+    @Override
     public String getName() {
         return this.name;
     }
 
+    @Override
     public void lock() {
-        lock0(DEFAULT_WAIT_TIME, DEFAULT_LEASE_TIME, DEFAULT_TIME_UNIT);
+        tryAcquire(DEFAULT_WAIT_TIME, DEFAULT_LEASE_TIME, DEFAULT_TIME_UNIT);
     }
 
+    @Override
     public boolean tryLock(long leaseTime, TimeUnit unit) throws InterruptedException {
-        return tryAcquire(leaseTime, unit) == null;
+        return tryAcquire0(leaseTime, unit) == null;
     }
 
+    @Override
     public void unlock() {
         unlock0();
     }
@@ -53,16 +58,43 @@ public abstract class AbstractTLock implements TLock{
     }
 
 
-    protected void lock0(long waitTime, long leaseTime, TimeUnit unit) {
+    protected boolean tryAcquire(long waitTime, long leaseTime, TimeUnit unit) {
+        long waitTimeMillis = unit.toMillis(waitTime);
+        long current = System.currentTimeMillis();
+
         // try to acquire lock
-        Long ttl = tryAcquire(leaseTime, unit);
+        Long ttl = tryAcquire0(leaseTime, unit);
         if (ttl == null) {
             // acquire success
-            return;
+            return true;
         }
 
-        // ttl > 0, thread need wait lock released
-        // TODO 等待机制
+        long remainWaitTime = waitTimeMillis - System.currentTimeMillis() - current;
+        if (remainWaitTime <= 0) {
+            // had over waitTime, return fail
+            return false;
+        }
+        // ttl > 0 && remainWaitTime > 0, thread need wait lock released
+        CompletableFuture<Boolean> future = subscribe();
+        future.whenComplete((r, e) -> {
+            if (e != null) {
+                // TODO subscribe has exception
+            }
+            if (r) {
+                // try to acquire PubSubLock, if success, try to acquire TLock
+                if (PubSubLock.tryLock()) {
+                    while (true) {
+                        // try to acquire lock again
+                        Long lockTtl = tryAcquire0(leaseTime, unit);
+                        if (lockTtl == null) {
+                            // success
+
+                        }
+                    }
+                }
+            }
+        });
+
     }
 
     /**
@@ -72,7 +104,7 @@ public abstract class AbstractTLock implements TLock{
      * @param unit
      * @return
      */
-    protected Long tryAcquire(long leaseTime, TimeUnit unit) {
+    protected Long tryAcquire0(long leaseTime, TimeUnit unit) {
         String tryLockLua =
                 "if redis.call('SETNX', KEYS[1], '1']) == '1' then " +
                         "    redis.call('PEXPIRE', KEYS[1], ARGV[1]) " +
@@ -96,9 +128,17 @@ public abstract class AbstractTLock implements TLock{
     /**
      * get lock key, which is thread id + client id
      *
-     * @return
+     * @return lock key
      */
     protected String getLockKey() {
-        return String.valueOf(Thread.currentThread().getId()) + ":" + this.clientId;
+        return Thread.currentThread().getId() + ":" + this.clientId;
+    }
+
+    protected String getChannelName() {
+        return "TLock__channel" + this.name;
+    }
+
+    protected CompletableFuture<Boolean> subscribe() {
+        return this.redisClient.subscribe(getChannelName());
     }
 }
