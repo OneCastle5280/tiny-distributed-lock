@@ -6,12 +6,6 @@ import java.util.concurrent.TimeUnit;
  * @author wangjiabao
  */
 public interface TLcokConstants {
-
-    /**
-     * default wait time, -1: waiting forever
-     */
-    Long DEFAULT_WAIT_TIME = -1L;
-
     /**
      * default lease time
      */

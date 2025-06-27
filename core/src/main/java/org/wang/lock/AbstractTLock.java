@@ -5,7 +5,8 @@ import org.wang.client.RedisClient;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import static org.wang.constants.TLcokConstants.*;
+import static org.wang.constants.TLcokConstants.DEFAULT_LEASE_TIME;
+import static org.wang.constants.TLcokConstants.DEFAULT_TIME_UNIT;
 
 /**
  * @author wangjiabao
@@ -15,11 +16,13 @@ public abstract class AbstractTLock implements TLock{
     protected String name;
     protected String clientId;
     protected RedisClient redisClient;
+    protected PubSubLock pubSubLock;
 
     protected AbstractTLock(String name) {
         this.name = name;
         // TODO init redisClient
         this.clientId = this.redisClient.getClientId();
+        this.pubSubLock = new PubSubLock();
     }
 
     @Override
@@ -29,12 +32,18 @@ public abstract class AbstractTLock implements TLock{
 
     @Override
     public void lock() {
-        tryAcquire(DEFAULT_WAIT_TIME, DEFAULT_LEASE_TIME, DEFAULT_TIME_UNIT);
+        try {
+            tryAcquireTLock(-1, DEFAULT_LEASE_TIME, DEFAULT_TIME_UNIT, false);
+        } catch (InterruptedException e) {
+            // Theoretically, no interrupt exception is returned here
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(getLockKey() + " lock fail");
+        }
     }
 
     @Override
-    public boolean tryLock(long leaseTime, TimeUnit unit) throws InterruptedException {
-        return tryAcquire0(leaseTime, unit) == null;
+    public void lockInterruptibly() throws InterruptedException {
+        tryAcquireTLock(-1, DEFAULT_LEASE_TIME, DEFAULT_TIME_UNIT, true);
     }
 
     @Override
@@ -43,22 +52,63 @@ public abstract class AbstractTLock implements TLock{
     }
 
     protected void unlock0() {
+        /*
+          check key is exist
+            a. if exists, del key and publish 1 to channel, return result
+            b. if not exists, return nil
+         */
         String unlockLua =
-                "if redis.call('EXISTS', KEYS[1]) == 1 then " +
-                        "    return redis.call('DEL', KEYS[1]) " +
-                        "else " +
-                        "    return nil " +
+                "if redis.call('EXISTS', KEYS[1]) == 1 then" +
+                        "    local result = redis.call('DEL', KEYS[1])" +
+                        "    redis.call('PUBLISH', ARGV[1], '1')" +
+                        "    return result" +
+                        "else" +
+                        "    return nil" +
                         "end";
         Object result = this.redisClient.executeLua(unlockLua, getLockKey(), null);
         if (result == null) {
             throw new IllegalStateException("illegal operator, " + getLockKey() + "is not hold the lock");
         }
-        // return 0 or 1 means unlock success
-        // TODO notice others waiting thread to acquire lock
+        // result not null means unlock success, notice others waiting thread to acquire lock
+        this.pubSubLock.unLock();
     }
 
+    @Override
+    public boolean tryLock(long leaseTime, TimeUnit unit) {
+        try {
+            return tryAcquireTLock(-1, leaseTime, unit, false);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(getLockKey() + " try lock fail");
+        }
+    }
 
-    protected boolean tryAcquire(long waitTime, long leaseTime, TimeUnit unit) {
+    @Override
+    public boolean tryLock(long waitTime, long leaseTime, TimeUnit unit) {
+        try {
+            return tryAcquireTLock(waitTime, leaseTime, unit, false);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(getLockKey() + " try lock fail");
+        }
+    }
+
+    @Override
+    public boolean tryLockInterruptibly(long waitTime, long leaseTime, TimeUnit unit) throws InterruptedException {
+        return tryAcquireTLock(waitTime, leaseTime, unit, true);
+    }
+
+    /**
+     * try acquire TLock
+     *
+     * @param waitTime        If the lock is occupied by other threads, how long is allowed to wait, default -1, means not to wait
+     * @param leaseTime       lease lock time
+     * @param unit            waitTime,leaseTime time unit
+     * @param interruptibly   whether throws {@link InterruptedException}, true: throw, false: not throw
+     * @return
+     * @throws InterruptedException
+     */
+    protected boolean tryAcquireTLock(long waitTime, long leaseTime, TimeUnit unit, boolean interruptibly) throws InterruptedException {
         long waitTimeMillis = unit.toMillis(waitTime);
         long current = System.currentTimeMillis();
 
@@ -74,27 +124,50 @@ public abstract class AbstractTLock implements TLock{
             // had over waitTime, return fail
             return false;
         }
+
         // ttl > 0 && remainWaitTime > 0, thread need wait lock released
+        // TODO timeout
         CompletableFuture<Boolean> future = subscribe();
         future.whenComplete((r, e) -> {
-            if (e != null) {
-                // TODO subscribe has exception
-            }
-            if (r) {
-                // try to acquire PubSubLock, if success, try to acquire TLock
-                if (PubSubLock.tryLock()) {
-                    while (true) {
-                        // try to acquire lock again
-                        Long lockTtl = tryAcquire0(leaseTime, unit);
-                        if (lockTtl == null) {
-                            // success
+        });
 
+        current = System.currentTimeMillis();
+        try {
+            // Spin lock
+            while (true) {
+                // try to acquire lock again
+                ttl = tryAcquire0(leaseTime, unit);
+                if (ttl == null) {
+                    // acquire lock success, break
+                    return true;
+                } else {
+                    if (ttl < 0) {
+                        throw new IllegalStateException(getLockKey() + " ttl < 0");
+                    } else {
+                        // if remainWaitTime <= 0, return false
+                        remainWaitTime -= System.currentTimeMillis() - current;
+                        if (remainWaitTime <= 0) {
+                            return false;
+                        }
+
+                        // ttl >= 0, try to acquire PubSubLock, if success, try to acquire TLock
+                        try {
+                            this.pubSubLock.tryLock(ttl, TimeUnit.MILLISECONDS);
+                        } catch (InterruptedException e) {
+                            if (interruptibly) {
+                                throw e;
+                            } else {
+                                // ignore InterruptedException, continue to try lock
+                                this.pubSubLock.tryLock(ttl, TimeUnit.MILLISECONDS);
+                            }
                         }
                     }
                 }
             }
-        });
-
+        } finally {
+            // Cancel subscribe
+            unSubscribe();
+        }
     }
 
     /**
@@ -140,5 +213,9 @@ public abstract class AbstractTLock implements TLock{
 
     protected CompletableFuture<Boolean> subscribe() {
         return this.redisClient.subscribe(getChannelName());
+    }
+
+    protected void unSubscribe(){
+        // TODO unSubscribe
     }
 }

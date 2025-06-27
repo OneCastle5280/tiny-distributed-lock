@@ -49,6 +49,6 @@ public class JedisRedisClient implements RedisClient {
                 // TODO
             }
         };
-        jedis.subscribe(jedisPubSub, channel);
+        jedis.subscribe(jedisPubSub, channel)
     }
 }
