@@ -22,10 +22,12 @@ public abstract class AbstractTLock implements TLock{
     protected String clientId;
     protected RedisClientWrapper redisClientWrapper;
     protected PubSubLock pubSubLock;
+    protected WatchDog watchDog;
 
     protected AbstractTLock(String name) {
         this.redisClientWrapper = new RedisClientWrapper();
         this.pubSubLock = new PubSubLock();
+        this.watchDog = new WatchDog(this);
 
         this.name = name;
         this.clientId = this.redisClientWrapper.getClientId();
@@ -64,12 +66,12 @@ public abstract class AbstractTLock implements TLock{
             b. if not exists, return nil
          */
         String unlockLua =
-                "if redis.call('EXISTS', KEYS[1]) == 1 then" +
-                        "    local result = redis.call('DEL', KEYS[1])" +
-                        "    redis.call('PUBLISH', ARGV[1], '1')" +
-                        "    return result" +
-                        "else" +
-                        "    return nil" +
+                "if redis.call('EXISTS', KEYS[1]) == 1 then\n" +
+                        "    local result = redis.call('DEL', KEYS[1])\n" +
+                        "    redis.call('PUBLISH', ARGV[1], '1')\n" +
+                        "    return result\n" +
+                        "else\n" +
+                        "    return nil\n" +
                         "end";
 
         List<String> args = new ArrayList<>();
@@ -136,7 +138,6 @@ public abstract class AbstractTLock implements TLock{
         }
 
         // ttl > 0 && remainWaitTime > 0, thread need wait lock released
-        // TODO timeout
         Boolean subscribeRes;
         try {
             subscribeRes = subscribe(remainWaitTime, unit, interruptibly);
@@ -197,12 +198,12 @@ public abstract class AbstractTLock implements TLock{
      */
     protected Long tryAcquire0(long leaseTime, TimeUnit unit) {
         String tryLockLua =
-                "if redis.call('SETNX', KEYS[1], '1') == 1 then " +
-                        "    local expireTime = tonumber(ARGV[1]) " +
-                        "    redis.call('PEXPIRE', KEYS[1], expireTime) " +
-                        "    return nil" +
-                        "else" +
-                        "    return redis.call('PTTL', KEYS[1]) " +
+                "if redis.call('SETNX', KEYS[1], '1') == 1 then\n" +
+                        "    local expireTime = tonumber(ARGV[1])\n" +
+                        "    redis.call('PEXPIRE', KEYS[1], expireTime)\n" +
+                        "    return nil\n" +
+                        "else\n" +
+                        "    return redis.call('PTTL', KEYS[1])\n" +
                         "end"
                 ;
 
@@ -210,9 +211,9 @@ public abstract class AbstractTLock implements TLock{
         args.add(String.valueOf(unit.toMillis(leaseTime)));
         Object ttl = this.redisClientWrapper.executeLua(tryLockLua, getLockKey(), args);
         if (ttl == null) {
-            // acquire lock success, add watchdog to renewal
-            // TODO watchdog
-            return 0L;
+            // acquire lock success, add watchdog to renewal, TODO intervalTime to be determined
+            this.watchDog.renewalLock(getLockKey(), leaseTime, leaseTime / 2, TimeUnit.MILLISECONDS);
+            return null;
         }
         return (Long) ttl;
     }
@@ -236,7 +237,7 @@ public abstract class AbstractTLock implements TLock{
     /**
      * subscribe channel
      */
-    protected Boolean subscribe(long waitTime, TimeUnit unit, boolean interruptibly) throws
+    private Boolean subscribe(long waitTime, TimeUnit unit, boolean interruptibly) throws
             InterruptedException, ExecutionException, TimeoutException {
         CompletableFuture<Boolean> future = this.redisClientWrapper.subscribe(getChannel());
         try {
@@ -253,7 +254,23 @@ public abstract class AbstractTLock implements TLock{
     /**
      * cancel subscribe
      */
-    protected void unSubscribe(){
+    private void unSubscribe(){
         this.redisClientWrapper.unSubscribe(getChannel());
+    }
+
+    protected boolean renewal(long intervalTime, TimeUnit unit) {
+        String renewal =
+                "if redis.call('EXISTS', KEYS[1]) == 1 then\n" +
+                "    local expireTime = tonumber(ARGV[1])\n" +
+                "    redis.call('PEXPIRE', KEYS[1], expireTime)\n" +
+                "    return redis.call('PTTL', KEYS[1])\n" +
+                "else\n" +
+                "    return nil\n" +
+                "end";
+
+        List<String> args = new ArrayList<>();
+        args.add(String.valueOf(unit.toMillis(intervalTime)));
+        Object result = this.redisClientWrapper.executeLua(renewal, getLockKey(), args);
+        return result != null;
     }
 }

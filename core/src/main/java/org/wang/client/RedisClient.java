@@ -38,6 +38,9 @@ public interface RedisClient {
      */
     void unSubscribe(String channel);
 
+    /**
+     * execute lua script
+     */
     Object executeLua(String script, String key, List<String> args);
 
 }

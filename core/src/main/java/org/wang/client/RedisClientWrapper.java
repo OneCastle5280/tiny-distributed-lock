@@ -1,5 +1,6 @@
 package org.wang.client;
 
+import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -14,6 +15,7 @@ public class RedisClientWrapper implements RedisClient{
 
     public RedisClientWrapper() {
         // TODO SPI redisClient
+        redisClient = new JedisRedisClient(new InetSocketAddress("127.0.0.1", 6379));
     }
 
     @Override
