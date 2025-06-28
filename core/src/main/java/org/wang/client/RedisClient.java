@@ -1,5 +1,6 @@
 package org.wang.client;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -7,6 +8,9 @@ import java.util.concurrent.CompletableFuture;
  */
 public interface RedisClient {
 
+    /**
+     * @return return the client id
+     */
     String getClientId();
 
     /**
@@ -26,6 +30,14 @@ public interface RedisClient {
      */
     CompletableFuture<Boolean> subscribe(String channel);
 
-    Object executeLua(String script, String key, Object[] args);
+    /**
+     * unsubscribe channel
+     *
+     * @param channel
+     * @return
+     */
+    void unSubscribe(String channel);
+
+    Object executeLua(String script, String key, List<String> args);
 
 }

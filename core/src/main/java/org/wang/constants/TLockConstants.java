@@ -5,7 +5,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * @author wangjiabao
  */
-public interface TLcokConstants {
+public interface TLockConstants {
     /**
      * default lease time
      */

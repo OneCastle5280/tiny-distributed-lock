@@ -1,12 +1,17 @@
 package org.wang.lock;
 
-import org.wang.client.RedisClient;
+import org.wang.client.RedisClientWrapper;
+import org.wang.exception.SubscribeChannelException;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
-import static org.wang.constants.TLcokConstants.DEFAULT_LEASE_TIME;
-import static org.wang.constants.TLcokConstants.DEFAULT_TIME_UNIT;
+import static org.wang.constants.TLockConstants.DEFAULT_LEASE_TIME;
+import static org.wang.constants.TLockConstants.DEFAULT_TIME_UNIT;
 
 /**
  * @author wangjiabao
@@ -15,14 +20,15 @@ public abstract class AbstractTLock implements TLock{
 
     protected String name;
     protected String clientId;
-    protected RedisClient redisClient;
+    protected RedisClientWrapper redisClientWrapper;
     protected PubSubLock pubSubLock;
 
     protected AbstractTLock(String name) {
-        this.name = name;
-        // TODO init redisClient
-        this.clientId = this.redisClient.getClientId();
+        this.redisClientWrapper = new RedisClientWrapper();
         this.pubSubLock = new PubSubLock();
+
+        this.name = name;
+        this.clientId = this.redisClientWrapper.getClientId();
     }
 
     @Override
@@ -65,7 +71,11 @@ public abstract class AbstractTLock implements TLock{
                         "else" +
                         "    return nil" +
                         "end";
-        Object result = this.redisClient.executeLua(unlockLua, getLockKey(), null);
+
+        List<String> args = new ArrayList<>();
+        args.add(getChannel());
+
+        Object result = this.redisClientWrapper.executeLua(unlockLua, getLockKey(), args);
         if (result == null) {
             throw new IllegalStateException("illegal operator, " + getLockKey() + "is not hold the lock");
         }
@@ -127,9 +137,17 @@ public abstract class AbstractTLock implements TLock{
 
         // ttl > 0 && remainWaitTime > 0, thread need wait lock released
         // TODO timeout
-        CompletableFuture<Boolean> future = subscribe();
-        future.whenComplete((r, e) -> {
-        });
+        Boolean subscribeRes;
+        try {
+            subscribeRes = subscribe(remainWaitTime, unit, interruptibly);
+        } catch (TimeoutException | ExecutionException e) {
+            throw new SubscribeChannelException(e);
+        }
+
+        if (!subscribeRes) {
+            // try to subscribe channel fail, return fail
+            return false;
+        }
 
         current = System.currentTimeMillis();
         try {
@@ -179,17 +197,18 @@ public abstract class AbstractTLock implements TLock{
      */
     protected Long tryAcquire0(long leaseTime, TimeUnit unit) {
         String tryLockLua =
-                "if redis.call('SETNX', KEYS[1], '1']) == '1' then " +
-                        "    redis.call('PEXPIRE', KEYS[1], ARGV[1]) " +
+                "if redis.call('SETNX', KEYS[1], '1') == 1 then " +
+                        "    local expireTime = tonumber(ARGV[1]) " +
+                        "    redis.call('PEXPIRE', KEYS[1], expireTime) " +
                         "    return nil" +
                         "else" +
-                        "    return redis.call('PTTL', KEYS[1])" +
+                        "    return redis.call('PTTL', KEYS[1]) " +
                         "end"
                 ;
 
-        Object[] args = new Object[1];
-        args[0] = unit.toMillis(leaseTime);
-        Object ttl = this.redisClient.executeLua(tryLockLua, getLockKey(), args);
+        List<String> args = new ArrayList<>();
+        args.add(String.valueOf(unit.toMillis(leaseTime)));
+        Object ttl = this.redisClientWrapper.executeLua(tryLockLua, getLockKey(), args);
         if (ttl == null) {
             // acquire lock success, add watchdog to renewal
             // TODO watchdog
@@ -207,15 +226,34 @@ public abstract class AbstractTLock implements TLock{
         return Thread.currentThread().getId() + ":" + this.clientId;
     }
 
-    protected String getChannelName() {
-        return "TLock__channel" + this.name;
+    /**
+     * @return pub/sub channel name
+     */
+    protected String getChannel() {
+        return "TLock__channel_" + this.name;
     }
 
-    protected CompletableFuture<Boolean> subscribe() {
-        return this.redisClient.subscribe(getChannelName());
+    /**
+     * subscribe channel
+     */
+    protected Boolean subscribe(long waitTime, TimeUnit unit, boolean interruptibly) throws
+            InterruptedException, ExecutionException, TimeoutException {
+        CompletableFuture<Boolean> future = this.redisClientWrapper.subscribe(getChannel());
+        try {
+            return future.get(waitTime, unit);
+        } catch (InterruptedException e) {
+            if (interruptibly) {
+                throw e;
+            }
+            // ignore interruptException
+            return future.get(waitTime, unit);
+        }
     }
 
+    /**
+     * cancel subscribe
+     */
     protected void unSubscribe(){
-        // TODO unSubscribe
+        this.redisClientWrapper.unSubscribe(getChannel());
     }
 }
