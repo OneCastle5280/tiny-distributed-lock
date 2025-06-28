@@ -9,6 +9,9 @@ import java.util.concurrent.TimeUnit;
  */
 public interface TLock {
 
+    /**
+     * @return the name of the lock.
+     */
     String getName();
 
     /**
